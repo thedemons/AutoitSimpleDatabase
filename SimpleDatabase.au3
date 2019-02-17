@@ -2,12 +2,14 @@
 #include-once
 #include <WINAPI.au3>
 #include <GDIPlus.au3>
+#include <ScreenCapture.au3>
 #include "AutoItObject_Internal.au3"
 
 Local Const $cbitRow = "01"
 Local Const $cbitCol = "02"
 Local Const $cbitString = "03"
 Local Const $cbitInt = "04"
+Local Const $cbitImage = "05"
 
 Local Const $cintDataLen = 10
 
@@ -15,19 +17,22 @@ Local Const $cintMaxNewRow = 100
 
 
 Func DB_Open()
+	_GDIPlus_Startup()
 	Local $hDB[1][1]
 	$hDB[0][0] = IDispatch()
 	$hDB[0][0].row = 1
 	$hDB[0][0].col = 1
 	$hDB[0][0].newCount = 0
-	$hDB[0][0].tempFile = FileOpen(_WinAPI_GetTempFileName(@TempDir), 16 + 2)
+	$hDB[0][0].tempFileName = _WinAPI_GetTempFileName(@TempDir)
+	$hDB[0][0].tempFile = FileOpen($hDB[0][0].tempFileName, 16 + 2)
 	Return $hDB
 EndFunc
 
 Func DB_Close(ByRef $hDB)
 	FileClose($hDB[0][0].file)
 	FileClose($hDB[0][0].tempFile)
-	FileDelete($hDB[0][0].tempFile)
+	FileDelete($hDB[0][0].fileName)
+	FileDelete($hDB[0][0].tempFileName)
 	ReDim $hDB[0][0]
 EndFunc
 
@@ -38,7 +43,7 @@ Func DB_OpenFromFile(ByRef $hDB, $strFile)
 
 	Local $hFile = FileOpen($strFile, 16)
 
-	__InfoToHandle($hDB, $hFile)
+	__InfoToHandle($hDB, $hFile, $strFile)
 	$a = StringTrimLeft( FileRead($hFile, 1), 2)
 	If $a <> $cbitRow Then Return SetError(-1, 0, -2)
 
@@ -173,6 +178,13 @@ Func DB_SaveToFile($hDB, $strFile = False)
 	If $strFile Then FileClose($hFile)
 EndFunc
 
+Func DB_ScreenToindex($hDB, $iRow, $iCol, $x1 = 0, $y1 = 0, $x2 = -1, $y2 = -1, $cursor = True)
+	Local $strImageName = _WinAPI_GetTempFileName(@TempDir) & ".png"
+	_ScreenCapture_Capture($strImageName, $x1, $y1, $x2, $y2, $cursor)
+	DB_ImgFileToIndex($hDB, $strImageName, $iRow, $iCol)
+	FileDelete($strImageName)
+EndFunc
+
 Func DB_ImgFileToIndex($hDB, $fImage, $iRow, $iCol)
 
 	;check if database handle is valid
@@ -180,19 +192,47 @@ Func DB_ImgFileToIndex($hDB, $fImage, $iRow, $iCol)
 	If $iRow >= UBound($hDB, 1) Or $iCol >= UBound($hDB, 2) Then Return SetError(-2, 0, -2)
 	If Not FileExists($fImage) Then Return SetError(-3, 0, -3)
 
-	_GDIPlus_Startup() ;initialize GDI+
-	Local $hBitmap = _GDIPlus_BitmapCreateFromFile($fImage)
-	Local $iWidth = _GDIPlus_ImageGetWidth($hBitmap)
-	Local $iHeight = _GDIPlus_ImageGetHeight($hBitmap)
+	; read the image
+	Local $hFile = FileOpen($fImage, 16)
+	Local $fRead = FileRead($hFile)
 
+	FileSetPos($hDB[0][0].tempFile, 0, 2)
+	$hDB[$iRow][$iCol].isNew = True
+	$hDB[$iRow][$iCol].type = $cbitImage
+	$hDB[$iRow][$iCol].tempPos = FileGetPos($hDB[0][0].tempFile)
+	$hDB[$iRow][$iCol].len = StringLen($fRead) - 2 ; -2 bit of "0x"
+	FileWrite($hDB[0][0].tempFile, $fRead)
 
+	FileClose($hFile)
+EndFunc
 
-	_GDIPlus_BitmapDispose($hBitmap)
-	_GDIPlus_Shutdown()
+Func DB_GetImgFromIndex($hDB, $iRow, $iCol)
+
+	;check if database handle is valid
+	If __CheckHandle($hDB) = False Then Return SetError(-1, 0, -1)
+	If $iRow >= UBound($hDB, 1) Or $iCol >= UBound($hDB, 2) Then Return SetError(-2, 0, -2)
+
+	Local $hFile = ($hDB[$iRow][$iCol].isNew ? $hDB[0][0].tempFile : $hDB[0][0].file)
+	Local $pPos = ($hDB[$iRow][$iCol].isNew ? $hDB[$iRow][$iCol].tempPos: (($hDB[$iRow][$iCol].pos - 1) / 2))
+
+;~ 	MsgBox(0,"", $hDB[$iRow][$iCol].tempPos)
+	FileSetPos($hFile, $pPos, 0)
+	Local $data = FileRead($hFile, Round($hDB[$iRow][$iCol].len / 2))
+	Local $strTempFileName = _WinAPI_GetTempFileName(@TempDir)
+	Local $hTempFile =FileOpen($strTempFileName, 16 + 2); FileOpen, 16 + 2)
+
+	FileWrite($hTempFile, $data)
+	FileClose($hTempFile)
+
+	Local $hBitmap = _GDIPlus_BitmapCreateFromFile($strTempFileName)
+;~ 	_GDIPlus_BitmapDispose($hBitmap)
+;~ 	_GDIPlus_Shutdown()
+
+	FileDelete($strTempFileName)
+	Return $hBitmap
 EndFunc
 
 Func DB_AddNewRow(ByRef $hDB, $data)
-
 	;check if database handle and data array is valid
 	If __CheckHandle($hDB) = False Then Return SetError(-1, 0, -1) ; array handle is invalid
 	If 		UBound($data) < 1 	   Then Return SetError(-2, 0, -2) ; array data is invalid
@@ -225,6 +265,7 @@ Func DB_ReadDataFromIndex($hDB, $iRow, $iCol, $InBinary = False)
 	;check if database handle is valid
 	If __CheckHandle($hDB) = False Then Return SetError(-1, 0, -1)
 	If $iRow >= UBound($hDB, 1) Or $iCol >= UBound($hDB, 2) Then Return SetError(-2, 0, -2)
+	If $hDB[$iRow][$iCol].type = $cbitImage Then Return "/img"
 	If $hDB[$iRow][$iCol].isNew Then
 		FileSetPos($hDB[0][0].tempFile, $hDB[$iRow][$iCol].tempPos, 0)
 		$data = StringTrimLeft(FileRead($hDB[0][0].tempFile, Round($hDB[$iRow][$iCol].len / 2)), 2)
@@ -270,13 +311,14 @@ Func _ReadDataFromColumn($hDB, $pPos)
 	Return $data
 EndFunc
 
-Func __InfoToHandle(ByRef $hDB, $hFile)
+Func __InfoToHandle(ByRef $hDB, $hFile, $strFile)
 
 	;check if database handle is valid
 	If __CheckHandle($hDB) = False Then Return SetError(-1, 0, -1)
 
 	;parsing info to handle array
 	$hDB[0][0].file = $hFile
+	$hDB[0][0].fileName = $strFile
 EndFunc
 
 Func __GetDataType($data)
